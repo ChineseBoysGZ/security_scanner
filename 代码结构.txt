@@ -1,0 +1,32 @@
+security_scanner/
+├── main.py                 # 主入口：主窗口、菜单栏、程序启动（仅管UI框架，无业务逻辑）
+├── config/                 # 配置管理模块
+│   ├── __init__.py
+│   ├── config_manager.py   # 配置加载/保存/验证（原ConfigManager，增强配置备份/验证）
+│   └── constants.py        # 全局常量集中管理（正则默认值、Excel默认配置、扫描参数默认值）
+├── core/                   # 核心业务逻辑（与PyQt5解耦，纯Python代码，可单独调用）
+│   ├── __init__.py
+│   ├── file_scanner.py     # 扫描核心：文件收集、单文件扫描、正则匹配（原ScannerThread的核心逻辑）
+│   ├── regex_manager.py    # 正则管理：编译、验证、测试（原ConfigManager的正则相关+RegexPage的测试逻辑）
+│   └── excel_exporter.py   # Excel导出：写入、样式设置、列配置（原ScanPage的_export_results）
+│   └── file_reader.py   # 智能文件读取器 - 解决大文件卡死问题
+│   └── scan_models.py   # 核心数据模型与扫描状态管理 - 阶段一基础
+│   └── scanner_engine.py   # 核心扫描引擎 - 高性能、防卡死、单次遍历设计
+│   └── scanner_manager.py   # 扫描管理器 - 协调扫描、正则、导出，提供高级API
+│   └── models.py   # 抽象扫描结果数据模型:用类替代原有的元组传递扫描结果，新增字段时只需在类中添加属性，无需修改所有调用处.
+├── ui/                     # UI模块（仅管界面展示，无核心业务逻辑）
+│   ├── __init__.py
+│   ├── styles.py           # 样式表集中管理：所有控件的样式常量（按钮、列表、输入框等）
+│   ├── pages/              # 各功能页面（原ScanPage、RegexPage、ExcelSettingsPage）
+│   │   ├── __init__.py
+│   │   ├── scan_page.py
+│   │   ├── regex_page.py
+│   │   └── excel_settings_page.py
+│   │   └── excel_match_page.py
+│   └── components.py       # 公共UI组件：封装常用控件（带样式的按钮、输入框、列表），避免重复代码
+└── utils/                  # 工具函数模块（通用工具，无业务关联）
+    ├── __init__.py
+    ├── file_utils.py       # 文件工具：编码检测、隐藏文件过滤、文件大小转换、魔数检测
+    ├── log_utils.py        # 日志工具：集成logging，同时输出到UI和日志文件
+    ├── signal_throttler.py        # 信号节流器 - 控制高频信号发射频率，防止GUI卡顿
+    └── thread_utils.py     # 线程工具：线程安全列表、带锁装饰器、通用QThread封装
