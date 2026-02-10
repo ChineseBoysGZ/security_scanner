@@ -75,9 +75,9 @@ class ScannerManager:
                 self._callbacks[event_type].append(callback)
     
     def _emit_event(self, event_type: str, *args, **kwargs):
-        """触发事件回调"""
+        """触发事件回调 - ✅ 添加安全保护"""
         with self._lock:
-            callbacks = self._callbacks.get(event_type, [])
+            callbacks = list(self._callbacks.get(event_type, []))  # ✅ 复制列表，防止迭代中修改
         
         for callback in callbacks:
             try:
@@ -92,10 +92,7 @@ class ScannerManager:
         on_progress: Optional[Callable] = None,
         on_match_found: Optional[Callable] = None
     ) -> bool:
-        """
-        启动扫描（异步）
-        返回是否成功启动
-        """
+        """启动扫描（异步）"""
         with self._lock:
             if self._scan_thread and self._scan_thread.is_alive():
                 logger.warning("扫描已在运行中")
@@ -107,7 +104,10 @@ class ScannerManager:
             self._context_ready_event.clear()
             self.results_queue = Queue(maxsize=1000)
             self.current_batch.clear()
-            
+
+            # ✅ 修复：清除旧回调，防止重复注册导致信号翻倍
+            self._callbacks = {k: [] for k in self._callbacks}
+
             # 注册回调
             if on_progress:
                 self.register_callback('progress', on_progress)
@@ -399,4 +399,3 @@ class ScannerManager:
         # 同时记录到日志
         for line in report.split('\n'):
             logger.info(line)
-
