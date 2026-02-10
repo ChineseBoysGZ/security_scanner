@@ -32,6 +32,10 @@ from ui.components import (
 
 class ScanPage(QWidget):
     """安全扫描页-性能版｜无预览/过滤｜精准匹配日志｜无重复日志｜防卡死保护"""
+    # ✅ 新增：匹配日志计数器
+    _match_log_count = 0
+    _MATCH_LOG_LIMIT = 200  # 日志框最多显示200条匹配
+
     def __init__(self, config_manager):
         super().__init__()
         self.config_manager = config_manager
@@ -490,7 +494,7 @@ class ScanPage(QWidget):
         self.all_results.clear()
         self.log_text.clear()
         self.progress_bar.setValue(0)
-        self.progress_bar.setMaximum(100)  # 初始设置为百分比模式
+        self.progress_bar.setMaximum(100)
         self.progress_label.setText("就绪")
         self.export_btn.setEnabled(False)
         self.total_file_label.setText("总文件数：--")
@@ -498,6 +502,13 @@ class ScanPage(QWidget):
         self.stop_btn.setEnabled(False)
         self._set_ui_enabled(True)
         self._scan_start_time = None
+        self._match_log_count = 0  # ✅ 重置匹配日志计数器
+
+        # ✅ 修复：确保定时器存在（之前可能被设为 None）
+        if not hasattr(self, '_update_timer') or self._update_timer is None:
+            self._update_timer = QTimer(self)
+            self._update_timer.setInterval(500)
+            self._update_timer.timeout.connect(self._update_time_display)
 
     # -------------------------- 线程信号槽（✅ 统计开始时禁用控件，核心防卡死） --------------------------
     @pyqtSlot()
@@ -514,8 +525,7 @@ class ScanPage(QWidget):
     @pyqtSlot(int)
     def _on_file_count_completed(self, total_valid: int):
         """
-        统计完成，更新总文件数
-        ✅ 修复：确保进度条最大值正确
+        统计完成，更新总文件数 + ✅ 恢复 UI 控件
         """
         self.total_file_label.setText(f"总文件数：{total_valid}")
     
@@ -530,7 +540,6 @@ class ScanPage(QWidget):
             self.progress_bar.setMaximum(0)
             self.ui_log("📊 文件统计完成！未找到有效文件")
         
-        self.ui_log(f"📊 文件统计完成！本次共扫描 {total_valid} 个有效文件")
         logger.info(f"文件统计完成，共{total_valid}个有效文件")
 
     @pyqtSlot(str)
@@ -593,17 +602,17 @@ class ScanPage(QWidget):
     @pyqtSlot(str, str)
     def on_match_found(self, file_path: str, match_content: str):
         """
-        正则匹配发现日志
-        :param file_path: 匹配到的文件完整路径
-        :param match_content: 匹配到的具体内容
+        匹配发现槽函数
+        ✅ 修复：限制日志条数，防止 QTextEdit 渲染导致 UI 卡死
         """
-        # 超长匹配内容截断（避免日志冗余，性能优化）
+        self._match_log_count += 1
+        if self._match_log_count > self._MATCH_LOG_LIMIT:
+            if self._match_log_count == self._MATCH_LOG_LIMIT + 1:
+                self.ui_log(f"⚠️ 匹配日志已达 {self._MATCH_LOG_LIMIT} 条上限，后续匹配不再显示（结果仍会导出到Excel）")
+            return
         if len(match_content) > 150:
             match_content = match_content[:150] + "......【内容过长，已截断】"
-        # ✅ 精准打印：文件路径 + 匹配内容，格式清晰
         self.ui_log(f"🔍 [匹配发现] 文件路径：{file_path} | 匹配内容：{match_content}")
-        # 控制台/文件日志可按需开启（注释则仅UI展示）
-        # logger.info(f"匹配发现：{file_path} | 内容：{match_content[:100]}...")
 
     # -------------------------- 扫描完成（✅ 日志去重，统一恢复控件状态） --------------------------
     @pyqtSlot(list, dict)
@@ -666,12 +675,10 @@ class ScanPage(QWidget):
     def _stop_update_timer(self):
         """停止更新时间显示的定时器"""
         # ✅ 修复：先检查属性是否存在
+        # ✅ 修复：只停止，不设为 None（否则下次扫描无法启动）
         if hasattr(self, '_update_timer') and self._update_timer:
-            # ✅ 修复：检查定时器是否正在运行，然后停止
             if self._update_timer.isActive():
                 self._update_timer.stop()
-                logger.debug("更新定时器已停止")
-            self._update_timer = None
 
     def _auto_export_results(self, results):
         """自动导出结果（在主线程执行）"""
