@@ -7,7 +7,7 @@ core/scanner_manager.py
 import threading
 import time
 from typing import Dict, List, Optional, Callable, Any
-from queue import Queue
+from queue import Queue, Full
 import logging
 
 from .scanner_engine import ScannerEngine
@@ -19,23 +19,11 @@ from utils.log_utils import logger
 class ScannerManager:
     """
     扫描管理器 - 高级协调器
-    负责：
-    1. 管理扫描生命周期（启动、暂停、停止）
-    2. 协调扫描引擎、正则管理器、导出器
-    3. 提供线程安全的回调机制
-    4. 实现结果分批处理和内存控制
-    优化点：
-    1. 移除重复的文件统计
-    2. 集成新的ScannerEngine
-    3. 优化进度更新逻辑
     """
-    
     def __init__(self, config_manager):
         """
         初始化扫描管理器
-        :param config_manager: ConfigManager实例
         """
-        
         self.config_manager = config_manager
         self.engine: Optional[ScannerEngine] = None
         self.context: Optional[ScanContext] = None
@@ -105,10 +93,7 @@ class ScannerManager:
             self.results_queue = Queue(maxsize=1000)
             self.current_batch.clear()
 
-            # ✅ 修复：清除旧回调，防止重复注册导致信号翻倍
-            self._callbacks = {k: [] for k in self._callbacks}
-
-            # 注册回调
+            # 只注册额外的回调（如果通过参数传入的话）
             if on_progress:
                 self.register_callback('progress', on_progress)
             if on_match_found:
@@ -131,13 +116,10 @@ class ScannerManager:
     def _scan_worker(self, scan_paths: List[str], max_file_size_mb: Optional[int]):
         """
         扫描工作线程
-        优化:消除重复统计
-        集成新的正则管理器
         """
         try:
             # 创建上下文
             self.context = ScanContext()
-            
             # 创建引擎 - 不再传入total_files
             self.engine = ScannerEngine(self.context)
             
@@ -150,7 +132,6 @@ class ScannerManager:
             
             # 通知监控线程上下文已就绪
             self._context_ready_event.set()
-            
             # 启动监控线程
             self._start_monitor_thread()
             
@@ -213,8 +194,7 @@ class ScannerManager:
         finally:
             # 停止监控线程
             self._stop_monitor_thread()
-            
-            # 清理资源
+            # 清理资源 
             self.engine = None
             self.context = None
             self._context_ready_event.clear()
@@ -242,15 +222,12 @@ class ScannerManager:
                 logger.error("上下文初始化失败，监控线程退出")
                 return
             
-            logger.debug("监控线程进入主循环")
-            
             # 主监控循环
             while not self._stop_event.is_set() and self.context is not None:
                 try:
                     # 检查停止事件
                     if self._stop_event.is_set():
                         self.context.request_stop()
-                        logger.debug("收到停止信号，停止上下文")
                         break
                     
                     # 检查暂停事件
@@ -261,20 +238,16 @@ class ScannerManager:
                     
                     # 检查上下文是否请求停止
                     if self.context and self.context.should_stop():
-                        logger.debug("上下文请求停止，监控线程退出")
                         break
                     
                     time.sleep(0.1)
                     
-                except AttributeError as e:
-                    logger.error(f"监控线程属性错误: {e}")
+                except AttributeError:
                     break
                 except Exception as e:
                     logger.error(f"监控线程异常: {e}")
                     break
-            
-            logger.debug("监控线程退出")
-            
+
         except Exception as e:
             logger.error(f"监控线程启动失败: {e}")
     
@@ -283,25 +256,22 @@ class ScannerManager:
         if self._monitor_thread and self._monitor_thread.is_alive():
             # 设置停止事件，让线程自然退出
             self._stop_event.set()
-            
             # 等待线程结束（最多1秒）
             self._monitor_thread.join(timeout=1)
-            if self._monitor_thread.is_alive():
-                logger.warning("监控线程未在1秒内结束")
-            
             self._monitor_thread = None
-            logger.debug("监控线程已停止")
     
     def _handle_match_found(self, result: ScanResult):
         """处理单个匹配结果"""
         # 添加到当前批次
         self.current_batch.append(result)
-        self.results_queue.put(result)
+        # ✅ 修复：使用 put_nowait 避免 Queue 满时阻塞扫描线程
+        try:
+            self.results_queue.put_nowait(result)
+        except Full:
+            pass  # Queue 满了就丢弃，结果已在 all_results 中保存
         
-        # 触发单个匹配回调
         self._emit_event('match_found', result)
         
-        # 检查批次是否已满
         if len(self.current_batch) >= self.batch_size:
             self._handle_batch_found(self.current_batch.copy())
             self.current_batch.clear()
@@ -346,7 +316,6 @@ class ScannerManager:
             
             # 停止监控线程
             self._stop_monitor_thread()
-            
             logger.info("扫描已停止")
             
             # 重置事件（为下次扫描准备）
@@ -378,11 +347,10 @@ class ScannerManager:
         """获取性能摘要"""
         if self.context and hasattr(self.context, 'get_stats'):
             stats = self.context.get_stats()
-            
             # 添加正则性能统计
             from .regex_manager import get_regex_stats
             regex_stats = get_regex_stats()
-            
+
             return {
                 'scan_stats': stats,
                 'regex_stats': regex_stats,
