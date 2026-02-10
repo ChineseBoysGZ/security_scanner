@@ -504,12 +504,6 @@ class ScanPage(QWidget):
         self._scan_start_time = None
         self._match_log_count = 0  # ✅ 重置匹配日志计数器
 
-        # ✅ 修复：确保定时器存在（之前可能被设为 None）
-        if not hasattr(self, '_update_timer') or self._update_timer is None:
-            self._update_timer = QTimer(self)
-            self._update_timer.setInterval(500)
-            self._update_timer.timeout.connect(self._update_time_display)
-
     # -------------------------- 线程信号槽（✅ 统计开始时禁用控件，核心防卡死） --------------------------
     @pyqtSlot()
     def _on_file_counting(self):
@@ -528,18 +522,14 @@ class ScanPage(QWidget):
         统计完成，更新总文件数 + ✅ 恢复 UI 控件
         """
         self.total_file_label.setText(f"总文件数：{total_valid}")
-    
-        # 只有在总数大于0时才设置进度条最大值
+
         if total_valid > 0:
-            # 设置进度条为确定模式，最大值为总文件数
-            self.progress_bar.setMaximum(100)  # 百分比模式
+            self.progress_bar.setMaximum(100)
             self.progress_bar.setValue(0)
-            self.ui_log(f"📊 文件统计完成！本次共扫描 {total_valid} 个有效文件")
         else:
-            # 没有文件，设为不确定模式
             self.progress_bar.setMaximum(0)
-            self.ui_log("📊 文件统计完成！未找到有效文件")
-        
+
+        self.ui_log(f"📊 文件统计完成！本次共扫描 {total_valid} 个有效文件")
         logger.info(f"文件统计完成，共{total_valid}个有效文件")
 
     @pyqtSlot(str)
