@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Iterator, Set, Tuple, Any
 import logging
 
+from collections import deque
 from .scan_models import ScanContext, ScanResult, ScanState, ScanConfig
 from .file_reader import SmartFileReader, should_skip_file
 from .file_collector import FileCollector
@@ -16,6 +17,7 @@ from core.regex_manager import get_pattern_manager, compile_patterns_dict
 from config.constants import SKIP_EXTENSIONS, SKIP_NO_EXTENSION_FILES
 from utils.log_utils import logger
 
+_APP_ID_PATTERN = re.compile(r'online[\\/](.*?)_all_all', re.IGNORECASE)
 
 class ScannerEngine:
     """
@@ -37,11 +39,12 @@ class ScannerEngine:
         self.file_collector: Optional[FileCollector] = None
         
         # 性能监控
+        # ✅ 修复：使用 deque 限制大小，防止内存膨胀
         self.match_stats = {
             'total_matches': 0,
             'merged_matches': 0,
             'single_matches': 0,
-            'match_times': [],
+            'match_times': deque(maxlen=10000),  # ✅ 最多保留10000条
             'pattern_hits': {},
             'start_time': 0
         }
@@ -49,9 +52,7 @@ class ScannerEngine:
         # 匹配顺序缓存
         self.pattern_order = []
         self.use_merged_patterns = True  # 是否启用合并正则
-
-        # ✅ 修复：添加匹配去重机制
-        self._matched_positions: Set[Tuple[str, int, int]] = set()  # (文件路径, 行号, 规则名) 哈希
+        self._matched_positions: Set[Tuple[str, int, int]] = set()
 
     def prepare(self, config: ScanConfig) -> bool:
         """准备扫描引擎：启用正则合并和性能优化"""
@@ -104,7 +105,7 @@ class ScannerEngine:
             self.ctx.total_files_scanned = 0
             self.ctx.total_files_skipped = 0
             self.ctx.total_matches_found = 0
-            self.ctx.start_time = time.time()
+            self.ctx.start_time = time.perf_counter()  # ✅ 修复：与 get_stats 保持一致
             
             # 记录准备信息
             logger.info(f"扫描引擎准备就绪:")
@@ -453,51 +454,60 @@ class ScannerEngine:
     def _process_chunk_with_merged_patterns(self, chunk: str, file_path: Path, 
                                           file_size: int, encoding: str, 
                                           position: int) -> List[ScanResult]:
-        """使用合并正则处理文件块"""
+        """使用合并正则处理文件块 - ✅ 修复变量名错误"""
         results = []
         
         if not self.use_merged_patterns or not self.merged_pattern_groups:
-            # 回退到单正则匹配
-            return self._process_line_with_single_patterns(line, file_path, file_size, encoding, line_num)
+            # ✅ 修复：使用正确的参数名（原来错误地使用了 line/line_num）
+            return self._process_chunk_with_single_patterns(chunk, file_path, file_size, encoding, position)
     
         matched_patterns = set()  # 记录已匹配的模式，避免重复
         
-        # 第一步：使用合并正则匹配
-        for group_name, merged_pattern, subpattern_map in self.merged_pattern_groups:
+        # 按行分割 chunk 进行处理
+        lines = chunk.split('\n')
+        estimated_line_start = max(1, position // 100)  # 估算起始行号
+        
+        for i, line in enumerate(lines):
             if self.ctx.should_stop():
                 break
+            
+            line_num = estimated_line_start + i
+            line_stripped = line.strip()
+            if not line_stripped or len(line_stripped) < 3:
+                continue
+            
+            for group_name, merged_pattern, subpattern_map in self.merged_pattern_groups:
+                if self.ctx.should_stop():
+                    break
+            
+                matches = merged_pattern.finditer(line_stripped)
+                for match in matches:
+                    for group_id, pattern_name in subpattern_map.items():
+                        matched_text = match.group(group_id)
+                        if matched_text and pattern_name not in matched_patterns:
+                            matched_patterns.add(pattern_name)
+                        
+                            result = ScanResult(
+                                rule_name=pattern_name,
+                                file_path=str(file_path),
+                                match_content=matched_text[:500] + "..." if len(matched_text) > 500 else matched_text,
+                                line_num=line_num,
+                                app_id=self._extract_app_id(str(file_path)),
+                                file_size=file_size,
+                                encoding=encoding
+                            )
+                            results.append(result)
+                        
+                            self.match_stats['merged_matches'] += 1
+                            self.match_stats['pattern_hits'][pattern_name] = \
+                                self.match_stats['pattern_hits'].get(pattern_name, 0) + 1
         
-            matches = merged_pattern.finditer(line)
-            for match in matches:
-                # 确定是哪个子模式匹配的
-                for group_id, pattern_name in subpattern_map.items():
-                    matched_text = match.group(group_id)
-                    if matched_text and pattern_name not in matched_patterns:
-                        matched_patterns.add(pattern_name)
-                    
-                        # 创建结果对象
-                        result = ScanResult(
-                            rule_name=pattern_name,
-                            file_path=str(file_path),
-                            match_content=matched_text[:500] + "..." if len(matched_text) > 500 else matched_text,
-                            line_num=line_num,
-                            app_id=self._extract_app_id(str(file_path)),
-                            file_size=file_size,
-                            encoding=encoding
-                        )
-                        results.append(result)
-                    
-                        # 更新性能统计
-                        self.match_stats['merged_matches'] += 1
-                        self.match_stats['pattern_hits'][pattern_name] = \
-                            self.match_stats['pattern_hits'].get(pattern_name, 0) + 1
-        
-        # 第二步：使用单个正则匹配（用于未合并的正则）
+        # 单个正则匹配
         if self.single_patterns:
-            line_results = self._process_line_with_single_patterns(
-                line, file_path, file_size, encoding, line_num
+            single_results = self._process_chunk_with_single_patterns(
+                chunk, file_path, file_size, encoding, position
             )
-            results.extend(line_results)
+            results.extend(single_results)
     
         return results
     
@@ -635,10 +645,8 @@ class ScannerEngine:
     
     @staticmethod
     def _extract_app_id(file_path: str) -> str:
-        """从文件路径中提取应用ID"""
-        import re
-        pattern = re.compile(r'online[\\/](.*?)_all_all', re.IGNORECASE)
-        match = pattern.search(file_path)
+        """从文件路径中提取应用ID - ✅ 使用模块级预编译正则"""
+        match = _APP_ID_PATTERN.search(file_path)
         return match.group(1).strip() if match else ""
     
     def _print_scan_summary(self):
@@ -706,8 +714,8 @@ class ScannerEngine:
             })
         
         # 匹配时间统计
-        if self.match_stats['match_times']:
-            match_times = self.match_stats['match_times']
+        if deque:
+            match_times = deque
             stats.update({
                 "total_match_time": round(sum(match_times), 3),
                 "avg_match_time_per_file": round(sum(match_times) / len(match_times) * 1000, 1),
