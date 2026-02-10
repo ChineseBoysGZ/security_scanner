@@ -1,16 +1,17 @@
 """
-utils/thread_utils.py - 修复版 v3
+utils/thread_utils.py
 修复：
 1. 文件统计在后台线程执行
 2. match_found 信号节流
 3. _on_completed 中所有 UI 操作通过信号转发到主线程（不直接操作 QTimer）
 4. 删除死代码
+5. ✅ 新增 @pyqtSlot 装饰器修复 QMetaObject.invokeMethod 调用失败
 """
 import threading
 import time
 from collections import deque
 from typing import Optional, Callable
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer
 
 from utils.log_utils import logger
 
@@ -28,7 +29,7 @@ class ScannerThreadManager(QObject):
     current_file = pyqtSignal(str)
     match_found = pyqtSignal(str, str)
 
-    # ✅ 新增：内部信号，用于后台线程安全地通知主线程做清理
+    # ✅ 内部信号，用于后台线程安全地通知主线程做清理
     _internal_completed = pyqtSignal(list, dict)
     _internal_error = pyqtSignal(str)
 
@@ -139,14 +140,18 @@ class ScannerThreadManager(QObject):
                 max_file_size_mb=max_file_size_mb
             )
             if not success:
-                self._internal_error.emit("无法启动扫描，可能已有扫描任务在运行")
+                self._internal_error.emit("无法启动扫描，可���已有扫描任务在运行")
 
         except Exception as e:
             logger.error(f"文件统计/启动扫描失败: {e}", exc_info=True)
             self._internal_error.emit(f"启动扫描失败: {str(e)[:200]}")
 
+    @pyqtSlot()
     def _start_all_timers(self):
-        """✅ 在主线程中启动所有定时器（通过 invokeMethod 调用）"""
+        """
+        ✅ 在主线程中启动所有定时器（通过 invokeMethod 调用）
+        必须有 @pyqtSlot() 装饰器，否则 QMetaObject.invokeMethod 找不到这个方法！
+        """
         self._progress_timer.start()
         self._file_timer.start()
         self._status_timer.start()
